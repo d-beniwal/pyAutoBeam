@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyAutoBeam"
+version = "0.1.0"
+description = "Python-based automation of beamlines"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "h5py",
+    "scipy",
+    "tifffile",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pyautobeam = ["data/*.txt", "attenuation/data/*.txt"]
