@@ -198,7 +198,7 @@ Examples:
 The `stats.py` module provides per-frame pixel intensity statistics for a single data file. It applies the same preprocessing pipeline as the main analysis and reports pixel counts in user-defined intensity bins.
 
 ```bash
-python -m pyautobeam.attenuation.stats data/scan_att0_1p0s.h5 \
+python -m pyautobeam.attenuation.stats --datapath data/scan_att0_1p0s.h5 \
     --lowI 500 --highI 10000 --targetI 40000 --darkfile dark.h5
 ```
 

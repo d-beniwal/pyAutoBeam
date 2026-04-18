@@ -232,11 +232,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  %(prog)s data/scan_att0_1p0s.h5 --lowI 1000 --highI 40000 --targetI 50000
-  %(prog)s data/scan.h5 --lowI 500 --highI 30000 --targetI 50000 --darkfile dark.h5
+  %(prog)s --datapath data/scan_att0_1p0s.h5 --lowI 1000 --highI 40000 --targetI 50000
+  %(prog)s --datapath data/scan.h5 --darkfile dark.h5
 """,
     )
-    parser.add_argument("path", help="Path to HDF5 data file")
+    parser.add_argument("--datapath", required=True,
+                        help="Path to HDF5 data file")
     parser.add_argument("--lowI", type=float, default=500,
                         help="Lower intensity threshold (default: 500)")
     parser.add_argument("--highI", type=float, default=10000,
@@ -258,7 +259,7 @@ examples:
     args = parser.parse_args()
 
     frame_stats(
-        path=args.path,
+        path=args.datapath,
         lowI=args.lowI,
         highI=args.highI,
         targetI=args.targetI,
