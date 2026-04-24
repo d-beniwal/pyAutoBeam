@@ -22,23 +22,30 @@ from pyautobeam.processing.mask import (
 _DARK_KEYS = ["exchange/dark", "exchange/data_dark", "exchange/dark_data"]
 
 
-def frame_stats(path, lowI=500, highI=10000, targetI=40000,
-                skip_frames_str="0", darkfile=None, dark_mask=True,
+def frame_stats(path, low=1.0, high=40000.0,
+                skip_frames=1, darkfile=None, dark_mask=True,
                 maskfile=None, percentile_mask=100.0):
     """Compute per-frame pixel intensity statistics.
+
+    Reports per-frame Min / Max / Mean and counts of pixels below
+    ``low`` / above ``high``.  Stats are computed on the
+    fully-preprocessed data (frame skipping, dark subtraction,
+    masking, percentile mask), and percentages use the full frame
+    area as the denominator.
 
     Parameters
     ----------
     path : str
         Path to an HDF5 data file.
-    lowI : float
-        Lower intensity threshold.
-    highI : float
-        Upper intensity threshold.
-    targetI : float
-        Target intensity threshold.
-    skip_frames_str : str
-        Dash-separated frame indices to skip (default ``"0"``).
+    low : float
+        Lower intensity threshold.  Pixels below this count toward
+        the ``< low`` column.
+    high : float
+        Upper intensity threshold.  Pixels above this count toward
+        the ``> high`` column.
+    skip_frames : int
+        Number of frames to skip from the start of the stack
+        (default 1).  Set to 0 to use all frames.
     darkfile : str or None
         Path to dark HDF5 file (``exchange/data`` averaged).
     dark_mask : bool
@@ -51,9 +58,10 @@ def frame_stats(path, lowI=500, highI=10000, targetI=40000,
     Returns
     -------
     dict
-        kept_indices, per_frame (list of dicts), totals
+        kept_indices, per_frame (list of dicts with min/max/mean/
+        n_low/n_high), summary (min/max/mean of each column).
     """
-    skip_frames = [int(x) for x in skip_frames_str.split("-") if x.strip()]
+    skip_frames = max(0, int(skip_frames))
 
     # ── Load data ──────────────────────────────────────────────────
     result = read_hdf5(path)
@@ -64,11 +72,12 @@ def frame_stats(path, lowI=500, highI=10000, targetI=40000,
           f"from {os.path.basename(path)}")
 
     # ── Skip frames ───────────────────────────────────────────────
-    kept_indices = [i for i in range(data.shape[0]) if i not in skip_frames]
-    valid_skip = [i for i in skip_frames if i < data.shape[0]]
-    if valid_skip:
-        data = np.delete(data, valid_skip, axis=0)
-        print(f"Skipped frames: {valid_skip} "
+    n_total = data.shape[0]
+    n_skip = min(skip_frames, n_total)
+    kept_indices = list(range(n_skip, n_total))
+    if n_skip > 0:
+        data = data[n_skip:]
+        print(f"Skipped first {n_skip} frame(s) "
               f"({data.shape[0]} frames remaining)")
 
     if data.shape[0] == 0:
@@ -122,13 +131,14 @@ def frame_stats(path, lowI=500, highI=10000, targetI=40000,
         print("Dark subtraction applied (negatives clipped to 0).")
 
     # ── Masks ─────────────────────────────────────────────────────
+    # Convention: 0 = good pixel, 1 = bad pixel.  Combine via logical OR.
     if maskfile:
         user_mask = load_mask(maskfile)
         if pixel_mask is not None:
-            pixel_mask = pixel_mask * user_mask
+            pixel_mask = np.maximum(pixel_mask, user_mask)
         else:
             pixel_mask = user_mask
-        n_bad = int(np.sum(user_mask < 0.5))
+        n_bad = int(np.sum(user_mask > 0.5))
         print(f"User mask applied ({n_bad} bad pixels).")
 
     if pixel_mask is not None:
@@ -137,90 +147,93 @@ def frame_stats(path, lowI=500, highI=10000, targetI=40000,
     if percentile_mask < 100.0:
         pct_mask = create_percentile_mask(data, percentile=percentile_mask)
         data = apply_mask(data, pct_mask)
-        n_hot = int(np.sum(pct_mask < 0.5))
+        n_hot = int(np.sum(pct_mask > 0.5))
         print(f"Percentile mask ({percentile_mask}%) applied "
               f"({n_hot} hot pixels masked).")
 
     # ── Build valid pixel mask (for counting) ─────────────────────
+    # A pixel is valid (good) when its mask value is 0.
     frame_shape = data.shape[1:]
     valid_mask = np.ones(frame_shape, dtype=bool)
     if pixel_mask is not None:
-        valid_mask &= (pixel_mask > 0.5)
+        valid_mask &= (pixel_mask < 0.5)
     if percentile_mask < 100.0:
-        valid_mask &= (pct_mask > 0.5)
+        valid_mask &= (pct_mask < 0.5)
 
     n_valid = int(np.sum(valid_mask))
     print(f"Valid pixels: {n_valid:,} / {valid_mask.size:,}")
 
     # ── Compute statistics ────────────────────────────────────────
-    print(f"\n{'=' * 70}")
+    total_pixels = int(np.prod(data.shape[1:]))
+
+    print(f"\n{'=' * 90}")
     print(f"PIXEL INTENSITY STATISTICS")
-    print(f"  lowI = {lowI}, highI = {highI}, targetI = {targetI}")
-    print(f"{'=' * 70}")
+    print(f"  low = {low}, high = {high}")
+    print(f"{'=' * 90}")
 
-    col_low = f"< {lowI:.0f}"
-    col_mid = f"{lowI:.0f}-{highI:.0f}"
-    col_high = f"> {highI:.0f}"
-    col_target = f"> {targetI:.0f}"
+    col_low = f"< {low}"
+    col_high = f"> {high}"
 
-    hdr = (f"  {'Frame':<8} "
-           f"{'Nr pixels':<12} "
-           f"{col_low:>14} "
-           f"{col_mid:>14} "
-           f"{col_high:>14} "
-           f"{col_target:>14}")
+    hdr = (f"  {'Frame':>7s}  {'Min':>12s}  {'Max':>12s}  {'Mean':>12s}"
+           f"  {col_low:>18s}  {col_high:>18s}")
+    sep = f"  {'-' * (len(hdr) - 2)}"
     print(hdr)
-    print(f"  {'-' * (len(hdr) - 2)}")
+    print(sep)
+
+    def _fmt_count(c, total):
+        return f"{int(c)}({100.0 * c / total:.2f}%)"
 
     per_frame = []
-    totals = {"below_low": 0, "between": 0, "above_high": 0,
-              "above_target": 0, "n_valid": 0}
+    all_min, all_max, all_mean, all_low, all_high = [], [], [], [], []
 
     for i, orig_idx in enumerate(kept_indices):
-        pixels = data[i][valid_mask]
-        n = len(pixels)
+        frame = data[i]
+        f_min = float(frame.min())
+        f_max = float(frame.max())
+        f_mean = float(frame.mean())
+        n_low = int(np.sum(frame < low))
+        n_high = int(np.sum(frame > high))
 
-        below_low = int(np.sum(pixels < lowI))
-        between = int(np.sum((pixels >= lowI) & (pixels <= highI)))
-        above_high = int(np.sum(pixels > highI))
-        above_target = int(np.sum(pixels > targetI))
-
-        frame_data = {
+        per_frame.append({
             "frame_idx": orig_idx,
-            "n_valid": n,
-            "below_low": below_low,
-            "between": between,
-            "above_high": above_high,
-            "above_target": above_target,
-        }
-        per_frame.append(frame_data)
+            "min": f_min, "max": f_max, "mean": f_mean,
+            "n_low": n_low, "n_high": n_high,
+        })
+        all_min.append(f_min)
+        all_max.append(f_max)
+        all_mean.append(f_mean)
+        all_low.append(n_low)
+        all_high.append(n_high)
 
-        totals["below_low"] += below_low
-        totals["between"] += between
-        totals["above_high"] += above_high
-        totals["above_target"] += above_target
-        totals["n_valid"] += n
+        print(f"  {orig_idx:>7d}  {f_min:>12.2f}  {f_max:>12.2f}  {f_mean:>12.2f}"
+              f"  {_fmt_count(n_low, total_pixels):>18s}"
+              f"  {_fmt_count(n_high, total_pixels):>18s}")
 
-        print(f"  F{orig_idx:<7} "
-              f"{n:<12,} "
-              f"{below_low:>14,} "
-              f"{between:>14,} "
-              f"{above_high:>14,} "
-              f"{above_target:>14,}")
+    print(sep)
 
-    # Totals row
-    print(f"  {'-' * (len(hdr) - 2)}")
-    print(f"  {'ALL':<8} "
-          f"{totals['n_valid']:<12,} "
-          f"{totals['below_low']:>14,} "
-          f"{totals['between']:>14,} "
-          f"{totals['above_high']:>14,} "
-          f"{totals['above_target']:>14,}")
+    summary = {
+        "min":  {"min": min(all_min),  "max": max(all_min),  "mean": float(np.mean(all_min))},
+        "max":  {"min": min(all_max),  "max": max(all_max),  "mean": float(np.mean(all_max))},
+        "mean": {"min": min(all_mean), "max": max(all_mean), "mean": float(np.mean(all_mean))},
+        "n_low":  {"min": min(all_low),  "max": max(all_low),  "mean": float(np.mean(all_low))},
+        "n_high": {"min": min(all_high), "max": max(all_high), "mean": float(np.mean(all_high))},
+    }
+
+    for label, agg in (("Min", "min"), ("Max", "max"), ("Mean", "mean")):
+        m_min  = summary["min"][agg]
+        m_max  = summary["max"][agg]
+        m_mean = summary["mean"][agg]
+        m_low  = summary["n_low"][agg]
+        m_high = summary["n_high"][agg]
+        print(f"  {label:>7s}  {m_min:>12.2f}  {m_max:>12.2f}  {m_mean:>12.2f}"
+              f"  {_fmt_count(m_low, total_pixels):>18s}"
+              f"  {_fmt_count(m_high, total_pixels):>18s}")
 
     return {
         "kept_indices": kept_indices,
         "per_frame": per_frame,
-        "totals": totals,
+        "summary": summary,
+        "total_pixels": total_pixels,
     }
 
 
@@ -232,18 +245,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
-  %(prog)s --datapath data/scan_att0_1p0s.h5 --lowI 1000 --highI 40000 --targetI 50000
-  %(prog)s --datapath data/scan.h5 --darkfile dark.h5
+  %(prog)s --datapath data/scan_att0_1p0s.h5 --low 1 --high 40000
+  %(prog)s --datapath data/scan.h5 --darkfile dark.h5 --skip_frames 0
 """,
     )
     parser.add_argument("--datapath", required=True,
                         help="Path to HDF5 data file")
-    parser.add_argument("--lowI", type=float, default=500,
-                        help="Lower intensity threshold (default: 500)")
-    parser.add_argument("--highI", type=float, default=10000,
-                        help="Upper intensity threshold (default: 10000)")
-    parser.add_argument("--targetI", type=float, default=40000,
-                        help="Target intensity threshold (default: 40000)")
+    parser.add_argument("--low", type=float, default=1.0,
+                        help="Lower intensity threshold (default: 1.0)")
+    parser.add_argument("--high", type=float, default=40000.0,
+                        help="Upper intensity threshold (default: 40000.0)")
     parser.add_argument("--darkfile", default=None,
                         help="Path to dark HDF5 file")
     parser.add_argument("--dark_mask", type=int, default=1, choices=[0, 1],
@@ -252,18 +263,17 @@ examples:
                         help="Path to binary mask file (.tif, .npy)")
     parser.add_argument("--percentile_mask", type=float, default=100.0,
                         help="Percentile of pixels to keep (default: 100)")
-    parser.add_argument("--skip_frames", default="0",
-                        help="Frame indices to skip, dash-separated "
-                             "(default: '0')")
+    parser.add_argument("--skip_frames", type=int, default=1,
+                        help="Number of frames to skip from the start "
+                             "(default: 1)")
 
     args = parser.parse_args()
 
     frame_stats(
         path=args.datapath,
-        lowI=args.lowI,
-        highI=args.highI,
-        targetI=args.targetI,
-        skip_frames_str=args.skip_frames,
+        low=args.low,
+        high=args.high,
+        skip_frames=args.skip_frames,
         darkfile=args.darkfile,
         dark_mask=bool(args.dark_mask),
         maskfile=args.maskfile,

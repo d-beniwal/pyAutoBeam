@@ -2,6 +2,23 @@
 
 This module provides automated X-ray attenuation analysis for synchrotron beamline experiments using Cu attenuators.
 
+## Public API
+
+All public names are lazily resolved from `pyautobeam.attenuation` (PEP 562 `__getattr__`) — importing the package itself does not trigger any submodule imports, and `python -m pyautobeam.attenuation.<submodule>` runs cleanly without the `runpy` "found in sys.modules" warning.
+
+```python
+from pyautobeam.attenuation import (
+    analyze,                # main offline analysis (single + multi file)
+    auto_attenuate_plan,    # bluesky plan: live attenuation tuning
+    beer_lambert_intensity, # I = I0 * exp(-mu * thickness)
+    fit_beer_lambert,       # log-space linear regression
+    check_residuals,        # outlier detection (residual / leave-one-out)
+    estimate_mu_linear,     # NIST mu in mm^-1 at a given energy (keV)
+    get_cu_mass_attenuation,# NIST mu/rho in cm^2/g at a given energy
+    frame_stats,            # per-frame pixel-count stats with preprocessing
+)
+```
+
 ## Physical Model
 
 An incident X-ray beam of intensity I0 passes through a Cu attenuator disk of known thickness, then scatters off the sample. The measured detector intensity follows:
@@ -60,12 +77,30 @@ Model quality is assessed via:
 Each data file goes through these steps before intensity extraction:
 
 1. **Load frames** from `exchange/data` in the HDF5 file
-2. **Skip frames** (default: frame 0). Configurable as dash-separated indices, e.g., `"0-1-3"`
+2. **Skip frames**: integer N — discard the first N frames of the stack (default `1`). Set to `0` to use every frame.
 3. **Dark subtraction**: if a dark file is provided, its frames (from `exchange/data`) are averaged into a mean dark frame, which is subtracted from each data frame. Negative values are clipped to zero.
 4. **Dark mask**: dead pixels (zero variance across dark frames) and hot pixels (above local mean + 5*std in a 101x101 neighborhood) are automatically identified and masked
-5. **User mask**: optional external binary mask file (.tif or .npy), convention 1=good, 0=bad
+5. **User mask**: optional external binary mask file (`.tif` or `.npy`). See [Bad Pixel Masks](#bad-pixel-masks) for the file format.
 6. **Percentile mask**: optional removal of the top percentile of pixels
 7. **Max intensity** is extracted from the fully processed frames
+
+## Bad Pixel Masks
+
+**Convention** (used everywhere in this module): `0 = good pixel, 1 = bad pixel`. Bad pixels are zeroed out wherever a mask is applied.
+
+`load_mask` accepts the following file formats and binarizes them on load, so any non-zero value is treated as bad:
+
+| Source                                   | Stored values | Behavior after `load_mask` |
+| ---------------------------------------- | ------------- | -------------------------- |
+| `uint8` TIFF / NumPy with `0/1`          | `{0, 1}`      | unchanged                  |
+| `uint8` TIFF saved as black/white image  | `{0, 255}`    | non-zero → 1                |
+| `uint16` TIFF                            | `{0, 65535}`  | non-zero → 1                |
+| boolean array                            | `{False, True}` | True → 1                  |
+| `float32` NumPy with `0.0/1.0`           | `{0.0, 1.0}`  | unchanged                  |
+
+The returned mask is always `float32` with values exactly `{0.0, 1.0}`.
+
+When multiple masks are combined (e.g., dark mask + user mask), they are merged with logical OR — a pixel is marked bad if **any** source flags it.
 
 ## File Filtering
 
@@ -120,7 +155,7 @@ python -m pyautobeam.attenuation.analysis --datapath data/scan_att0_1p0s.h5 --ta
 # With all options
 python -m pyautobeam.attenuation.analysis --datapath data/ --filestem LaB6 \
     --target_intensity 50000 --darkfile dark.h5 --percentile_mask 99.99 \
-    --min_intensity 500 --skip_frames 0-1 --energy 63 --output_plot fit.png
+    --min_intensity 500 --skip_frames 2 --energy 63 --output_plot fit.png
 ```
 
 ## CLI Arguments
@@ -137,7 +172,7 @@ python -m pyautobeam.attenuation.analysis --datapath data/ --filestem LaB6 \
 | `--maskfile`         | no       | `None`                | External binary mask file (.tif, .npy)        |
 | `--percentile_mask`  | no       | `100.0`               | Percentile of pixels to keep                  |
 | `--min_intensity`    | no       | `1000`                | Skip files below this max intensity           |
-| `--skip_frames`      | no       | `"0"`                 | Frame indices to skip, dash-separated         |
+| `--skip_frames`      | no       | `1`                   | Number of frames to skip from the start       |
 | `--output_plot`      | no       | `attenuation_fit.png` | Path for output plot                          |
 
 
@@ -195,11 +230,11 @@ Examples:
 
 ## Frame Statistics
 
-The `stats.py` module provides per-frame pixel intensity statistics for a single data file. It applies the same preprocessing pipeline as the main analysis and reports pixel counts in user-defined intensity bins.
+The `stats.py` module provides per-frame pixel intensity statistics for a single data file. It applies the same preprocessing pipeline as the main analysis (frame skipping, dark subtraction, dark + user + percentile masking) and reports per-frame **Min / Max / Mean** plus pixel counts below `--low` / above `--high`.
 
 ```bash
 python -m pyautobeam.attenuation.stats --datapath data/scan_att0_1p0s.h5 \
-    --lowI 500 --highI 10000 --targetI 40000 --darkfile dark.h5
+    --low 1 --high 40000 --darkfile dark.h5 --skip_frames 0
 ```
 
 ```python
@@ -207,17 +242,21 @@ from pyautobeam.attenuation import frame_stats
 
 result = frame_stats(
     path="data/scan_att0_1p0s.h5",
-    lowI=1000, highI=40000, targetI=50000,
+    low=1.0, high=40000.0,
     darkfile="dark.h5",
 )
+# result["per_frame"]    -- list of {frame_idx, min, max, mean, n_low, n_high}
+# result["summary"]      -- min/max/mean of each column across all frames
+# result["total_pixels"] -- denominator used for percentages
 ```
 
 Output columns per frame:
 
-- Pixels below `lowI`
-- Pixels between `lowI` and `highI`
-- Pixels above `highI`
-- Pixels above `targetI`
+- `Min`, `Max`, `Mean` of the (preprocessed) frame
+- Count of pixels `< low` with percentage of full frame area
+- Count of pixels `> high` with percentage of full frame area
+
+The footer reports the **Min / Max / Mean** of each column across all kept frames — useful for spotting first-frame transients, drift, or hot-pixel spikes.
 
 ## Automatic Attenuation Tuning (Bluesky Plan)
 
@@ -282,13 +321,14 @@ RE(auto_attenuate_plan(
 ## Module Contents
 
 
-| File                   | Description                                                       |
-| ---------------------- | ----------------------------------------------------------------- |
-| `analysis.py`          | Offline analysis: fit S*I0 from saved data files                  |
-| `auto_attenuate.py`    | Bluesky plan: automatic attenuation tuning (live acquisition)     |
-| `stats.py`             | Per-frame pixel intensity statistics                              |
-| `beer_lambert.py`      | Beer-Lambert law: forward calculation, fitting, outlier detection |
-| `nist_data.py`         | NIST Cu attenuation coefficient loading and interpolation         |
-| `data/Cu_att_data.txt` | NIST XCOM tabulated data for Cu                                   |
+| File                   | Description                                                                |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `__init__.py`          | Lazy public-API re-exports (PEP 562 `__getattr__`)                         |
+| `analysis.py`          | Offline analysis: fit S*I0 from saved data files                           |
+| `auto_attenuate.py`    | Bluesky plan: automatic attenuation tuning (live acquisition)              |
+| `stats.py`             | Per-frame pixel intensity statistics                                       |
+| `beer_lambert.py`      | Beer-Lambert law: forward calculation, fitting, outlier detection          |
+| `nist_data.py`         | NIST Cu attenuation coefficient loading and interpolation                  |
+| `data/Cu_att_data.txt` | NIST XCOM tabulated data for Cu                                            |
 
 

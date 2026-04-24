@@ -123,16 +123,22 @@ def discover_files(path, filestem="", file_ext=".h5"):
 # ── intensity extraction ────────────────────────────────────────────
 
 def extract_intensity(frames, dark=None, mask=None, percentile_mask_val=100.0,
-                      skip_frames=None):
-    """Extract the max intensity from a frame stack."""
-    if skip_frames is None:
-        skip_frames = [0]
+                      skip_frames=1):
+    """Extract the max intensity from a frame stack.
 
+    Parameters
+    ----------
+    skip_frames : int
+        Number of frames to skip from the start of the stack.
+        Default 1 (skip the first frame).
+    """
     data = np.array(frames, dtype=np.float32)
 
-    indices = [i for i in skip_frames if i < data.shape[0]]
-    if indices:
-        data = np.delete(data, indices, axis=0)
+    n_skip = max(0, int(skip_frames))
+    if n_skip >= data.shape[0]:
+        return 0.0
+    if n_skip > 0:
+        data = data[n_skip:]
 
     if data.shape[0] == 0:
         return 0.0
@@ -238,7 +244,7 @@ def plot_fit(collected_data, mu, C, mu_nist=None,
 # ── main analysis ────────────────────────────────────────────────────
 
 def analyze(path, target_counts=50000, filestem="",
-            skip_frames_str="0", darkfile=None, dark_mask=True,
+            skip_frames=1, darkfile=None, dark_mask=True,
             maskfile=None, percentile_mask=100.0,
             min_intensity=1000,
             output_plot=None,
@@ -260,8 +266,9 @@ def analyze(path, target_counts=50000, filestem="",
     filestem : str
         When *path* is a directory, only process files whose name
         starts with this string.
-    skip_frames_str : str
-        Dash-separated frame indices to skip (default ``"0"``).
+    skip_frames : int
+        Number of frames to skip from the start of each stack
+        (default 1).  Set to 0 to use all frames.
     darkfile : str or None
         Path to dark HDF5 file (``exchange/data`` averaged).
     dark_mask : bool
@@ -285,7 +292,7 @@ def analyze(path, target_counts=50000, filestem="",
         mu, mu_nist, C, SI0, r2 (if multi-file),
         collected_data, recommendations
     """
-    skip_frames = [int(x) for x in skip_frames_str.split("-") if x.strip()]
+    skip_frames = max(0, int(skip_frames))
 
     # ── Discover files ─────────────────────────────────────────────
     datasets = discover_files(path, filestem=filestem, file_ext=file_ext)
@@ -363,11 +370,13 @@ def analyze(path, target_counts=50000, filestem="",
 
     if maskfile:
         user_mask = load_mask(maskfile)
+        # Mask convention: 0 = good, 1 = bad. Combine masks via logical OR
+        # (a pixel is bad if any source flags it).
         if pixel_mask is not None:
-            pixel_mask = pixel_mask * user_mask
+            pixel_mask = np.maximum(pixel_mask, user_mask)
         else:
             pixel_mask = user_mask
-        n_bad = int(np.sum(user_mask < 0.5))
+        n_bad = int(np.sum(user_mask > 0.5))
         print(f"User mask applied ({n_bad} bad pixels).")
 
     # ── Banner ─────────────────────────────────────────────────────
@@ -386,7 +395,7 @@ def analyze(path, target_counts=50000, filestem="",
         print(f"Fitting        : mu and S*I0 (linear regression)")
     print(f"Target counts  : {target_counts}")
     print(f"Min intensity  : {min_intensity}")
-    print(f"Skip frames    : {skip_frames}")
+    print(f"Skip first N   : {skip_frames}")
     print(f"Dark file      : {darkfile or 'None'}")
     print(f"Dark mask      : {'Yes' if dark_mask and darkfile else 'No'}")
     print(f"User mask      : {maskfile or 'None'}")
@@ -596,9 +605,9 @@ examples:
     parser.add_argument("--min_intensity", type=float, default=1000,
                         help="Skip files with max intensity below this "
                              "(default: 1000)")
-    parser.add_argument("--skip_frames", default="0",
-                        help="Frame indices to skip, dash-separated "
-                             "(default: '0')")
+    parser.add_argument("--skip_frames", type=int, default=1,
+                        help="Number of frames to skip from the start "
+                             "(default: 1)")
     parser.add_argument("--output_plot", default=None,
                         help="Path for output plot (not saved if omitted)")
 
@@ -608,7 +617,7 @@ examples:
         path=args.datapath,
         target_counts=args.target_intensity,
         filestem=args.filestem,
-        skip_frames_str=args.skip_frames,
+        skip_frames=args.skip_frames,
         darkfile=args.darkfile,
         dark_mask=bool(args.dark_mask),
         maskfile=args.maskfile,

@@ -11,7 +11,12 @@ from pyautobeam.io.hdf5_reader import read_hdf5
 def load_mask(filepath):
     """Load a binary pixel mask from a TIFF or NumPy file.
 
-    The mask convention is: 1 = good pixel, 0 = bad pixel.
+    The mask convention is: 0 = good pixel, 1 = bad pixel.
+
+    The loaded mask is binarized so any non-zero value is treated as
+    "bad" (1) -- this accepts files that use 0/255 (uint8 image
+    convention), 0/65535 (uint16), boolean True/False, or 0.0/1.0
+    interchangeably.
 
     Parameters
     ----------
@@ -21,7 +26,7 @@ def load_mask(filepath):
     Returns
     -------
     numpy.ndarray
-        2D mask array.
+        2D float32 mask with values exactly 0.0 or 1.0.
 
     Raises
     ------
@@ -40,18 +45,21 @@ def load_mask(filepath):
             f"Unsupported mask file extension '{ext}'. Use .tif, .tiff, or .npy"
         )
 
-    return mask.astype(np.float32)
+    return (mask > 0).astype(np.float32)
 
 
 def apply_mask(data, mask):
     """Apply a binary pixel mask to detector data.
+
+    Bad pixels (mask == 1) are zeroed out; good pixels (mask == 0)
+    pass through unchanged.
 
     Parameters
     ----------
     data : numpy.ndarray
         Detector data, 2D (Y, X) or 3D (N, Y, X).
     mask : numpy.ndarray
-        2D mask (Y, X) with 1 = good pixel, 0 = bad pixel.
+        2D mask (Y, X) with 0 = good pixel, 1 = bad pixel.
         Spatial dimensions must match *data*.
 
     Returns
@@ -71,14 +79,14 @@ def apply_mask(data, mask):
             f"dimensions {spatial}"
         )
 
-    return data.astype(np.float32) * mask.astype(np.float32)
+    return data.astype(np.float32) * (1.0 - mask.astype(np.float32))
 
 
 def create_percentile_mask(data, percentile=99.99):
     """Create a mask that removes the highest-intensity pixels.
 
     Pixels whose intensity exceeds the given percentile threshold are
-    marked as bad (0).
+    marked as bad (1).
 
     Parameters
     ----------
@@ -92,8 +100,8 @@ def create_percentile_mask(data, percentile=99.99):
     Returns
     -------
     numpy.ndarray
-        2D binary mask (float32): 1 = below threshold (keep),
-        0 = above threshold (remove).
+        2D binary mask (float32): 0 = below threshold (good),
+        1 = above threshold (bad).
     """
     if data.ndim == 3:
         frame = np.mean(data, axis=0, dtype=np.float32)
@@ -101,7 +109,7 @@ def create_percentile_mask(data, percentile=99.99):
         frame = data.astype(np.float32)
 
     threshold = np.percentile(frame, percentile)
-    mask = np.where(frame <= threshold, 1.0, 0.0).astype(np.float32)
+    mask = np.where(frame > threshold, 1.0, 0.0).astype(np.float32)
     return mask
 
 
@@ -138,7 +146,7 @@ def create_dark_mask(darkfile, n_sigma=5, local_window=101, verbose=True):
     Returns
     -------
     mask : numpy.ndarray
-        2D float32 array (Y, X).  1 = good pixel, 0 = bad pixel.
+        2D float32 array (Y, X).  0 = good pixel, 1 = bad pixel.
     info : dict
         Diagnostic information:
 
@@ -189,7 +197,7 @@ def create_dark_mask(darkfile, n_sigma=5, local_window=101, verbose=True):
     hot_mask = mean_image > local_threshold
 
     bad_mask = dead_mask | hot_mask
-    mask = np.where(bad_mask, 0.0, 1.0).astype(np.float32)
+    mask = np.where(bad_mask, 1.0, 0.0).astype(np.float32)
 
     n_dead = int(np.sum(dead_mask))
     n_hot = int(np.sum(hot_mask))

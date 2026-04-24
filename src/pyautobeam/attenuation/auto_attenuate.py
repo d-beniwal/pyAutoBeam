@@ -103,26 +103,29 @@ def _find_best_settings(SI0, mu, target_intensity,
     return best_pos, best_time
 
 
-def _read_max_intensity(filepath, darkfile=None, skip_frames=None):
+def _read_max_intensity(filepath, darkfile=None, skip_frames=1):
     """Read an HDF5 file and return max intensity after preprocessing.
 
     This is called AFTER acquisition is complete and the file is on
     disk.  It does NOT interact with any hardware.
+
+    Parameters
+    ----------
+    skip_frames : int
+        Number of frames to skip from the start of the stack.
     """
     # Lazy imports to avoid pulling in h5py at plan definition time
     from pyautobeam.io.hdf5_reader import read_hdf5
     from pyautobeam.processing.dark import subtract_dark
 
-    if skip_frames is None:
-        skip_frames = [0]
-
     result = read_hdf5(filepath)
     data = np.array(result["data"], dtype=np.float32)
 
-    # Skip frames
-    indices = [i for i in skip_frames if i < data.shape[0]]
-    if indices:
-        data = np.delete(data, indices, axis=0)
+    n_skip = max(0, int(skip_frames))
+    if n_skip >= data.shape[0]:
+        return 0.0
+    if n_skip > 0:
+        data = data[n_skip:]
     if data.shape[0] == 0:
         return 0.0
 
@@ -158,7 +161,7 @@ def auto_attenuate_plan(
     min_acq_time=0.01,
     max_acq_time=100.0,
     max_iterations=10,
-    skip_frames=None,
+    skip_frames=1,
     verbose=True,
 ):
     """Bluesky plan: automatically find optimal attenuation settings.
@@ -207,8 +210,9 @@ def auto_attenuate_plan(
         Maximum allowed acquisition time.  Default 100.0 s.
     max_iterations : int
         Maximum number of acquisition attempts.  Default 10.
-    skip_frames : list of int or None
-        Frame indices to skip in analysis (default [0]).
+    skip_frames : int
+        Number of frames to skip from the start of each stack
+        (default 1).  Set to 0 to use all frames.
     verbose : bool
         Print progress to terminal.
 
@@ -225,8 +229,7 @@ def auto_attenuate_plan(
     # Lazy import so this module can be imported without bluesky
     import bluesky.plan_stubs as bps
 
-    if skip_frames is None:
-        skip_frames = [0]
+    skip_frames = max(0, int(skip_frames))
     if data_dir is None:
         data_dir = os.getcwd()
 
