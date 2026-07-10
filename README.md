@@ -24,6 +24,8 @@ src/pyautobeam/
 
     attenuation/         X-ray attenuation analysis workflow
         analysis.py          Main analysis tool (single + multi-file, CLI)
+        auto_attenuate.py    Bluesky plan: live attenuation tuning
+        attenuator.py        Attenuator position -> Cu thickness table (shared)
         beer_lambert.py      Beer-Lambert law fitting
         nist_data.py         NIST Cu attenuation coefficient interpolation
         data/                Tabulated NIST XCOM data
@@ -103,6 +105,14 @@ Command line:
 python -m pyautobeam.attenuation.analysis --datapath test_data/Ceria/ \
     --filestem Ceria --target_intensity 50000 --darkfile test_data/Ceria/dark.h5
 ```
+
+Energy, attenuator position, and acquisition time are resolved with the
+precedence **CLI > filename > metadata** (`--energy`, `--att_pos`,
+`--acq_time`, `--thickness` overrides; acquisition time falls back to the
+`scan_parameters/steptime` metadata field). Passing `--darkfile` also
+enables dead/hot-pixel masking, which is important for a reliable max
+intensity — a plain external bad-pixel mask often misses hot pixels that
+otherwise dominate the maximum.
 
 ## HDF5 Data Format
 

@@ -33,3 +33,6 @@ env/
 # Generated files
 *.png
 data_info.json
+
+# Scratch / working notes (not tracked)
+scratch/

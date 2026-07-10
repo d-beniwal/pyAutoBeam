@@ -33,8 +33,8 @@ I_measured = S * I0 * exp(-mu * thickness) * acq_time
 | **mu**        | Cu linear attenuation coefficient (mm^-1) | NIST XCOM data or fitted               |
 | **I0**        | Incident beam intensity (counts/s)        | Determined from data (as part of S*I0) |
 | **S**         | Sample scattering factor                  | Determined from data (as part of S*I0) |
-| **thickness** | Cu attenuator thickness (mm)              | Looked up from attenuator position     |
-| **acq_time**  | Per-frame acquisition time (s)            | Parsed from filename                   |
+| **thickness** | Cu attenuator thickness (mm)              | Looked up from attenuator position (or `--thickness`) |
+| **acq_time**  | Per-frame acquisition time (s)            | Filename, metadata, or `--acq_time`    |
 
 
 The code determines the product **S*I0** automatically from the data. No user input for I0 is needed.
@@ -166,7 +166,10 @@ python -m pyautobeam.attenuation.analysis --datapath data/ --filestem LaB6 \
 | `--datapath`         | yes      | --                    | HDF5 file or directory                        |
 | `--target_intensity` | yes      | --                    | Target intensity (counts)                     |
 | `--filestem`         | no       | `""`                  | Only process files starting with this string  |
-| `--energy`           | no       | from filename         | X-ray energy in keV                           |
+| `--energy`           | no       | from filename         | X-ray energy in keV (override)                |
+| `--att_pos`          | no       | from filename         | Attenuator position override                  |
+| `--acq_time`         | no       | filename / metadata   | Acquisition time (s) override                 |
+| `--thickness`        | no       | from att lookup       | Cu thickness (mm) override; bypasses lookup   |
 | `--darkfile`         | no       | `None`                | Dark HDF5 file path                           |
 | `--dark_mask`        | no       | `1`                   | Create dead/hot pixel mask from dark (0 or 1) |
 | `--maskfile`         | no       | `None`                | External binary mask file (.tif, .npy)        |
@@ -193,32 +196,49 @@ where density_Cu = 8.96 g/cm^3 and the factor of 10 converts cm^-1 to mm^-1.
 ## Attenuator Position Mapping
 
 
-| Position | Cu Thickness (mm) |
-| -------- | ----------------- |
-| 0        | 0.00              |
-| 1        | 0.50              |
-| 2        | 1.00              |
-| 3        | 1.50              |
-| 4        | 2.00              |
-| 5        | 2.39              |
-| 6        | 4.78              |
-| 8        | 7.14              |
-| 9        | 9.53              |
-| 10       | 11.91             |
-| 11       | 14.30             |
-| 12       | 16.66             |
+| Position (`attN`) | Cu Thickness (mm) |
+| ----------------- | ----------------- |
+| 0                 | 0.00              |
+| 1                 | 0.50              |
+| 2                 | 1.00              |
+| 3                 | 1.50              |
+| 4                 | 2.00              |
+| 5                 | 2.39              |
+| 6                 | 4.78              |
+| 7                 | 7.14              |
+| 8                 | 9.53              |
+| 9                 | 11.91             |
+| 10                | 14.30             |
+| 11                | 16.66             |
 
 
-Position 7 is not defined.
+The table is 0-based to match the `attN` file-naming convention (`att0` =
+no attenuator).  It lives in `attenuator.py` as the single source of truth,
+imported by both `analysis.py` and `auto_attenuate.py`.  A `--thickness`
+CLI override bypasses this lookup when a position is unknown or custom.
 
-## Filename Convention
+## Parameter Sources & Precedence
 
-Data filenames must contain the pattern `att<N>_<T>p<D>s` for the code to parse the attenuator position and acquisition time. Energy is parsed from `<N>keV` if present.
+Energy, attenuator position, and acquisition time are each resolved
+independently with the precedence **CLI override > filename > metadata**:
 
-Examples:
+- **Filename** tokens are matched independently and may appear in any order
+  (they need not be adjacent): `att<N>` (attenuator position),
+  `<T>p<D>s` (acquisition time), `<N>keV` (energy).  A missing token no
+  longer discards the whole file.
+- **Metadata** provides the acquisition-time fallback from
+  `measurement/process/scan_parameters/steptime` (surfaced as
+  `scan_steptime`).  Energy and attenuator position are **not** stored in
+  the files.  Note: `WM/AcqTime` is *not* used — it is an unrelated
+  constant in these files.
+- **CLI overrides** `--energy`, `--att_pos`, `--acq_time`, `--thickness`
+  always win.  Use them for sample files whose names lack the tokens.
+
+Examples (filename parsing):
 
 - `Ceria_63keV_900mm_100x100_att0_1p0s_012217.h5` -> att=0, acq=1.0s, energy=63 keV
 - `LaB6_63keV_900mm_100x100_att3_0p5s_012345.h5` -> att=3, acq=0.5s, energy=63 keV
+- `SS_1300x50_900mm_0p2s_step_0p25_att7_027531.h5` -> att=7, acq=0.2s (acq token precedes `att`)
 
 ## Output
 
@@ -326,6 +346,7 @@ RE(auto_attenuate_plan(
 | `__init__.py`          | Lazy public-API re-exports (PEP 562 `__getattr__`)                         |
 | `analysis.py`          | Offline analysis: fit S*I0 from saved data files                           |
 | `auto_attenuate.py`    | Bluesky plan: automatic attenuation tuning (live acquisition)              |
+| `attenuator.py`        | Attenuator position -> Cu thickness table (shared source of truth)         |
 | `stats.py`             | Per-frame pixel intensity statistics                                       |
 | `beer_lambert.py`      | Beer-Lambert law: forward calculation, fitting, outlier detection          |
 | `nist_data.py`         | NIST Cu attenuation coefficient loading and interpolation                  |

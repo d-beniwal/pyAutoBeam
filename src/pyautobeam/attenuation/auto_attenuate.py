@@ -42,18 +42,10 @@ import time
 import numpy as np
 
 from pyautobeam.attenuation.nist_data import estimate_mu_linear
-
-# Attenuator position -> Cu thickness (mm)
-_POS_THICKNESS = {
-    0: 0.00, 1: 0.50, 2: 1.00, 3: 1.50, 4: 2.00, 5: 2.39,
-    6: 4.78, 8: 7.14, 9: 9.53, 10: 11.91, 11: 14.30, 12: 16.66,
-}
-ALL_ATTENUATOR_POSITIONS = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]
-
-
-def att_thickness_from_pos(pos):
-    """Map attenuator position to Cu thickness in mm."""
-    return _POS_THICKNESS.get(pos, None)
+from pyautobeam.attenuation.attenuator import (
+    ALL_ATTENUATOR_POSITIONS,
+    att_thickness_from_pos,
+)
 
 
 def _predict_acq_time(SI0, mu, att_pos, target_intensity):

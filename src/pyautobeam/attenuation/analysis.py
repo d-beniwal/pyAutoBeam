@@ -38,43 +38,44 @@ from pyautobeam.processing.mask import (
     load_mask,
 )
 from pyautobeam.attenuation.nist_data import estimate_mu_linear
-
-
-# ── attenuator lookup ───────────────────────────────────────────────
-
-_POS_THICKNESS = {
-    0: 0.00, 1: 0.50, 2: 1.00, 3: 1.50, 4: 2.00, 5: 2.39,
-    6: 4.78, 8: 7.14, 9: 9.53, 10: 11.91, 11: 14.30, 12: 16.66,
-}
-
-ALL_ATTENUATOR_POSITIONS = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]
-
-
-def att_thickness_from_pos(pos):
-    """Map attenuator position index to Cu thickness in mm."""
-    return _POS_THICKNESS.get(pos, None)
+from pyautobeam.attenuation.attenuator import (
+    ALL_ATTENUATOR_POSITIONS,
+    att_thickness_from_pos,
+)
 
 
 # ── filename parsing ────────────────────────────────────────────────
+#
+# Each field is matched independently so the tokens may appear in any
+# order and need not be adjacent, e.g. both
+#   ..._att7_0p2s_...            (att before acq time)
+#   ..._0p2s_step_0p25_att7_...  (acq time before att)
+# parse correctly.
 
-_ATT_RE = re.compile(r"att(\d+)_(\d+)p(\d+)s")
+_ATT_RE = re.compile(r"att(\d+)")
+_ACQ_RE = re.compile(r"(\d+)p(\d+)s")
 _ENERGY_RE = re.compile(r"(\d+)keV")
 
 
 def parse_filename(filepath):
     """Extract energy, attenuator position, and acquisition time.
 
-    Returns None if the filename doesn't match the att pattern.
+    Each field is parsed independently and is ``None`` when the name does
+    not contain it.  This never returns ``None`` for the whole file —
+    missing values are filled in later from metadata or CLI overrides by
+    :func:`resolve_file_params`.
     """
     basename = os.path.basename(filepath)
 
+    att_pos = None
     m = _ATT_RE.search(basename)
-    if not m:
-        return None
+    if m:
+        att_pos = int(m.group(1))
 
-    att_pos = int(m.group(1))
-    acq_time_s = float(f"{m.group(2)}.{m.group(3)}")
-    thickness_mm = att_thickness_from_pos(att_pos)
+    acq_time_s = None
+    am = _ACQ_RE.search(basename)
+    if am:
+        acq_time_s = float(f"{am.group(1)}.{am.group(2)}")
 
     energy_keV = None
     em = _ENERGY_RE.search(basename)
@@ -85,19 +86,82 @@ def parse_filename(filepath):
         "energy_keV": energy_keV,
         "att_pos": att_pos,
         "acq_time_s": acq_time_s,
+    }
+
+
+def resolve_file_params(meta, metadata=None, att_pos_override=None,
+                        acq_time_override=None, thickness_override=None):
+    """Resolve att position, acquisition time, and Cu thickness for a file.
+
+    Precedence for each field is **CLI override > file name > metadata**.
+    Metadata only supplies the acquisition time (from
+    ``scan_steptime``); energy and attenuator position are not stored in
+    the files.
+
+    Parameters
+    ----------
+    meta : dict
+        Output of :func:`parse_filename` (may contain ``None`` values).
+    metadata : dict or None
+        The ``metadata`` dict from :func:`read_hdf5`, used for the
+        ``scan_steptime`` acquisition-time fallback.
+    att_pos_override, acq_time_override, thickness_override
+        CLI overrides; ``None`` means "not provided".
+
+    Returns
+    -------
+    dict
+        ``att_pos``, ``acq_time_s``, ``thickness_mm`` (any may be
+        ``None`` if unresolved) plus ``att_src`` / ``acq_src`` source
+        labels ("cli" / "file" / "meta") for reporting.
+    """
+    # Attenuator position: CLI > filename
+    if att_pos_override is not None:
+        att_pos, att_src = att_pos_override, "cli"
+    elif meta.get("att_pos") is not None:
+        att_pos, att_src = meta["att_pos"], "file"
+    else:
+        att_pos, att_src = None, None
+
+    # Acquisition time: CLI > filename > metadata (scan_steptime)
+    if acq_time_override is not None:
+        acq_time_s, acq_src = acq_time_override, "cli"
+    elif meta.get("acq_time_s") is not None:
+        acq_time_s, acq_src = meta["acq_time_s"], "file"
+    else:
+        acq_time_s, acq_src = None, None
+        if metadata is not None:
+            step = metadata.get("scan_steptime")
+            if step is not None and float(step) > 0:
+                acq_time_s, acq_src = float(step), "meta"
+
+    # Thickness: CLI override > lookup from att position
+    if thickness_override is not None:
+        thickness_mm = thickness_override
+    elif att_pos is not None:
+        thickness_mm = att_thickness_from_pos(att_pos)
+    else:
+        thickness_mm = None
+
+    return {
+        "att_pos": att_pos,
+        "acq_time_s": acq_time_s,
         "thickness_mm": thickness_mm,
+        "att_src": att_src,
+        "acq_src": acq_src,
     }
 
 
 # ── file discovery ──────────────────────────────────────────────────
 
 def discover_files(path, filestem="", file_ext=".h5"):
-    """Find data files from a path (single file or directory)."""
+    """Find data files from a path (single file or directory).
+
+    Every candidate file is kept; missing att/acq_time tokens in the name
+    are resolved later from metadata or CLI overrides.
+    """
     if os.path.isfile(path):
         meta = parse_filename(path)
-        if meta is None:
-            print(f"ERROR: Cannot parse att/acq_time from '{path}'.")
-            return []
         meta["filepath"] = os.path.abspath(path)
         return [meta]
 
@@ -113,9 +177,8 @@ def discover_files(path, filestem="", file_ext=".h5"):
     for filename in files:
         filepath = os.path.join(os.path.abspath(path), filename)
         meta = parse_filename(filepath)
-        if meta is not None:
-            meta["filepath"] = filepath
-            datasets.append(meta)
+        meta["filepath"] = filepath
+        datasets.append(meta)
 
     return datasets
 
@@ -248,7 +311,9 @@ def analyze(path, target_counts=50000, filestem="",
             maskfile=None, percentile_mask=100.0,
             min_intensity=1000,
             output_plot=None,
-            file_ext=".h5", energy_keV=None):
+            file_ext=".h5", energy_keV=None,
+            att_pos_override=None, acq_time_override=None,
+            thickness_override=None):
     """Run attenuation analysis on a single file or directory.
 
     Uses the model: I = S * I0 * exp(-mu * thickness) * acq_time.
@@ -284,7 +349,18 @@ def analyze(path, target_counts=50000, filestem="",
     file_ext : str
         File extension filter for directory mode.
     energy_keV : float or None
-        X-ray energy in keV.  Parsed from filename if not given.
+        X-ray energy in keV (CLI override).  Falls back to the value
+        parsed from the filename.
+    att_pos_override : int or None
+        Attenuator position override.  Takes precedence over the value
+        parsed from the filename.  In directory mode it is applied to
+        every file (a warning is printed).
+    acq_time_override : float or None
+        Acquisition time override in seconds.  Precedence is
+        CLI > filename > metadata (``scan_steptime``).
+    thickness_override : float or None
+        Cu thickness override in mm.  Bypasses the attenuator-position
+        lookup entirely.
 
     Returns
     -------
@@ -301,6 +377,17 @@ def analyze(path, target_counts=50000, filestem="",
         return None
 
     is_single = len(datasets) == 1
+
+    # ── Warn if scalar overrides are used across multiple files ─────
+    if not is_single:
+        overrides = [n for n, v in (
+            ("--att_pos", att_pos_override),
+            ("--acq_time", acq_time_override),
+            ("--thickness", thickness_override),
+        ) if v is not None]
+        if overrides:
+            print(f"WARNING: {', '.join(overrides)} override(s) will be "
+                  f"applied to all {len(datasets)} files.")
 
     # ── Determine energy ───────────────────────────────────────────
     if energy_keV is None:
@@ -412,24 +499,40 @@ def analyze(path, target_counts=50000, filestem="",
     collected_data = []
     for ds in datasets:
         basename = os.path.basename(ds["filepath"])
-        att_pos = ds["att_pos"]
-        thickness = ds["thickness_mm"]
-        acq_time = ds["acq_time_s"]
-
-        if thickness is None:
-            print(f"{basename:<50} {att_pos:>4} {'?':>10} "
-                  f"{acq_time:>8.1f} {'':>10} {'':>10} {'BAD ATT':>8}")
-            continue
 
         result = read_hdf5(ds["filepath"])
         frames = result["data"]
+
+        # Resolve att/acq/thickness per precedence CLI > filename > metadata
+        params = resolve_file_params(
+            ds, metadata=result.get("metadata"),
+            att_pos_override=att_pos_override,
+            acq_time_override=acq_time_override,
+            thickness_override=thickness_override,
+        )
+        att_pos = params["att_pos"]
+        thickness = params["thickness_mm"]
+        acq_time = params["acq_time_s"]
+
+        att_str = str(att_pos) if att_pos is not None else "?"
+        acq_str = f"{acq_time:.1f}" if acq_time is not None else "?"
+
+        if thickness is None:
+            print(f"{basename:<50} {att_str:>4} {'?':>10} "
+                  f"{acq_str:>8} {'':>10} {'':>10} {'BAD ATT':>8}")
+            continue
+
+        if acq_time is None or acq_time <= 0:
+            print(f"{basename:<50} {att_str:>4} {thickness:>10.2f} "
+                  f"{acq_str:>8} {'':>10} {'':>10} {'NO ACQ':>8}")
+            continue
 
         intensity = extract_intensity(frames, dark_mean, pixel_mask,
                                       percentile_mask, skip_frames)
 
         if intensity < min_intensity:
             reason = "LOW" if intensity > 0 else "ZERO"
-            print(f"{basename:<50} {att_pos:>4} {thickness:>10.2f} "
+            print(f"{basename:<50} {att_str:>4} {thickness:>10.2f} "
                   f"{acq_time:>8.1f} {intensity:>10.1f} {'':>10} "
                   f"{reason:>8}")
             continue
@@ -445,7 +548,7 @@ def analyze(path, target_counts=50000, filestem="",
             "log_rate": log_rate,
         })
 
-        print(f"{basename:<50} {att_pos:>4} {thickness:>10.2f} "
+        print(f"{basename:<50} {att_str:>4} {thickness:>10.2f} "
               f"{acq_time:>8.1f} {intensity:>10.1f} {log_rate:>10.4f} "
               f"{'OK':>8}")
 
@@ -462,17 +565,34 @@ def analyze(path, target_counts=50000, filestem="",
     log_rates = np.array([d["log_rate"] for d in collected_data])
 
     r2 = None
+    n_distinct_thick = len(set(thicknesses.tolist()))
 
-    if len(collected_data) == 1:
-        # Single file: use NIST mu, compute S*I0 directly
+    if n_distinct_thick < 2:
+        # mu cannot be fitted without >=2 distinct thicknesses (linregress
+        # rejects identical x-values).  Fix mu from NIST and compute S*I0
+        # from the mean of the available point(s).  Covers the single-file
+        # case and repeated measurements at one attenuator position.
         mu = mu_nist
-        C = log_rates[0] + mu * thicknesses[0]
+        C_values = log_rates + mu * thicknesses
+        C = float(np.mean(C_values))
         SI0 = math.exp(C)
 
-        print(f"Valid data points : 1")
+        n = len(collected_data)
+        if n == 1:
+            print(f"Valid data points : 1")
+        else:
+            print(f"Valid data points : {n} "
+                  f"(all at Cu thickness {thicknesses[0]:.2f} mm)")
+            print(f"NOTE: only one distinct thickness -> mu cannot be fitted; "
+                  f"using NIST mu and averaging S*I0.")
         print(f"mu (NIST, fixed)  : {mu:.4f} /mm")
         print(f"C = log(S*I0)     : {C:.4f}")
         print(f"S*I0              : {SI0:.2f} cts/s")
+        if n > 1:
+            si0_pts = np.exp(C_values)
+            spread = 100.0 * (si0_pts.max() - si0_pts.min()) / si0_pts.mean()
+            print(f"S*I0 per point    : min {si0_pts.min():.2f}, "
+                  f"max {si0_pts.max():.2f} (spread {spread:.1f}%)")
 
     else:
         # Multi-file: fit mu and S*I0 via linear regression
@@ -582,8 +702,11 @@ examples:
   # Single file (mu fixed from NIST)
   %(prog)s --datapath data/Ceria_63keV_att0_1p0s.h5 --target_intensity 50000
 
-  # With options
-  %(prog)s --datapath data/ --filestem LaB6 --energy 63 --percentile_mask 99.99 --target_intensity 50000
+  # With options (darkfile enables hot-pixel masking -> cleaner max intensity)
+  %(prog)s --datapath data/ --filestem LaB6 --energy 63 --percentile_mask 99.99 --target_intensity 50000 --darkfile dark.h5
+
+  # Overrides for a sample file whose name lacks tokens (CLI > filename > metadata)
+  %(prog)s --datapath data/sample.h5 --target_intensity 50000 --energy 71.676 --att_pos 7 --acq_time 0.2
 """,
     )
     parser.add_argument("--datapath", required=True,
@@ -593,7 +716,17 @@ examples:
     parser.add_argument("--filestem", default="",
                         help="Only process files starting with this string")
     parser.add_argument("--energy", type=float, default=None,
-                        help="X-ray energy in keV (fallback if not in filename)")
+                        help="X-ray energy in keV (override; else parsed "
+                             "from filename)")
+    parser.add_argument("--att_pos", type=int, default=None,
+                        help="Attenuator position override (else parsed "
+                             "from filename)")
+    parser.add_argument("--acq_time", type=float, default=None,
+                        help="Acquisition time (s) override. Precedence: "
+                             "CLI > filename > metadata (scan steptime)")
+    parser.add_argument("--thickness", type=float, default=None,
+                        help="Cu thickness (mm) override; bypasses the "
+                             "attenuator-position lookup")
     parser.add_argument("--darkfile", default=None,
                         help="Path to dark HDF5 file")
     parser.add_argument("--dark_mask", type=int, default=1, choices=[0, 1],
@@ -625,6 +758,9 @@ examples:
         min_intensity=args.min_intensity,
         output_plot=args.output_plot,
         energy_keV=args.energy,
+        att_pos_override=args.att_pos,
+        acq_time_override=args.acq_time,
+        thickness_override=args.thickness,
     )
 
 
